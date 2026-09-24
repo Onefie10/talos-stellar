@@ -165,6 +165,7 @@ class ReconcileConfig:
     completion_marker_retain_days: int = 7
     api_verify_leases: bool = True
     api_timeout_secs: float = 10.0
+    encryption_key_version: int = 1
 
 
 _DEFAULT_CONFIG = ReconcileConfig()
@@ -193,6 +194,7 @@ class ReconcileResult:
     claimed_jobs_restored: int = 0   # lease verified ✓ → populated in memory
     claimed_jobs_dropped: int = 0    # lease lost/expired → removed from DB
     claimed_jobs_deferred: int = 0   # API unreachable → kept in DB, not in memory
+    encryption_key_rotations: int = 0
 
     # Errors
     errors: list[str] = field(default_factory=list)
@@ -430,6 +432,16 @@ async def _verify_claimed_jobs(
     if not claimed_rows:
         return
 
+    # Rotate encryption keys with versioned envelopes if version changed
+    if config.encryption_key_version > 1:
+        try:
+            await commerce.rotate_encryption_keys(config.encryption_key_version)
+            result.encryption_key_rotations += 1
+        except Exception as exc:  # noqa: BLE001
+            msg = f"verify_claimed_jobs: encryption key rotation failed: {exc}"
+            result.errors.append(msg)
+            logger.warning(msg)
+
     now = _now_utc()
 
     for row in claimed_rows:
@@ -578,6 +590,11 @@ async def reconcile_after_restore(
 
     # Step 4 — re-verify claimed jobs against authoritative API (async, network)
     await _verify_claimed_jobs(db, api, result, config)
+
+    log.info(
+        "restore_reconciliation_complete",
+        encryption_key_rotations=result.encryption_key_rotations,
+    )
 
     log.info(
         "restore_reconciliation_complete",
