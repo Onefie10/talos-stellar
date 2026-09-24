@@ -321,14 +321,25 @@ switch (error.code) {
 
 ### Retry, Timeout & Observability
 
-`TalosClientOptions` accepts three additional fields, all optional and
-backward-compatible (defaults preserve previous behavior):
+`TalosClientOptions` accepts optional timeout / retry / observer fields.
+Both `retryPolicy` (status-code) and `retry` (typed-error) are validated at
+construction via `resolveRetryPolicy` / `resolveRetryOptions`: missing fields
+use defaults, malformed values throw privacy-safe `TypeError`/`RangeError`,
+and attempt counts are hard-capped at 8. Inspect the effective policy with
+`client.getRetryPolicy()` and `client.getRetryOptions()`.
 
 ```typescript
 const client = new TalosClient({
   baseUrl: "https://talos-stellar.vercel.app",
   apiKey: process.env.TALOS_KEY!,
   timeoutMs: 30_000,                     // per-request AbortController timeout
+  retryPolicy: {
+    maxAttempts: 3,                      // status-code policy (default on)
+    baseDelayMs: 100,
+    maxDelayMs: 1000,
+    retryMethods: ["GET", "HEAD", "PUT", "DELETE", "OPTIONS"],
+    retryStatusCodes: [429, 500, 502, 503, 504],
+  },
   retry: {
     maxAttempts: 4,                      // initial + 3 retries (default 1 = off)
     idempotentOnly: true,               // POST/PUT/PATCH never auto-retried
