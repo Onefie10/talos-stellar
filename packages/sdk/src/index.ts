@@ -13,6 +13,7 @@ export type {
   ResolvedRetryOptions,
   TalosErrorEvent,
   WriteOptions,
+  ReadOptions,
 } from "./client.js";
 
 // ── Idempotency ───────────────────────────────────────────────────
@@ -50,6 +51,8 @@ export {
   snapshotHeaders,
   parseRetryAfter,
   parseX402Challenge,
+  redactEventPath,
+  diagnoseBuyerProof,
   MAX_BODY_BYTES,
 } from "./errors.js";
 
@@ -64,6 +67,19 @@ export * from "./webhooks.js";
 export * from "./a2a-intent.js";
 export * from "./a2a-validation.js";
 export * from "./a2a-operations.js";
+export {
+  DEFAULT_SELLER_QUOTE_TTL_SECONDS,
+  SellerQuoteError,
+  constructSellerQuote,
+  constructSellerPaymentDetails,
+  toCanonicalDecimalAmount,
+} from "./seller-quote.js";
+export type {
+  ConstructSellerQuoteParams,
+  ConstructSellerPaymentDetailsParams,
+  SellerPaymentDetails,
+  SellerQuoteErrorCode,
+} from "./seller-quote.js";
 export {
   TalosEventStream,
   TalosStreamError,
@@ -84,3 +100,44 @@ export {
   ChaosInjectedError,
   globalChaosInjector,
 } from "./chaos.js";
+
+// ── Runtime compatibility matrix ──────────────────────────────────────────────
+
+export {
+  getRuntimeMatrix,
+  getRuntimeEntry,
+  detectRuntime,
+  probeGlobal,
+  checkRuntimeCompatibility,
+  assertRuntimeCompatibility,
+} from "./compat.js";
+export type {
+  SupportedRuntime,
+  RequiredCapability,
+  RuntimeMatrixEntry,
+  CompatibilityReport,
+} from "./compat.js";
+
+// Request signing
+export {
+  REQUEST_SIGNATURE_VERSION,
+  SigningController,
+  SigningError,
+  StellarKeypairSigner,
+  canonicalizeRequest,
+  detectSignerCapability,
+  encodeSignature,
+} from "./signing.js";
+export type {
+  CanonicalRequest,
+  RequestSigner,
+  SignatureResult,
+  SignOptions,
+  SigningCapability,
+  SigningControllerOptions,
+  SigningErrorCode,
+  SigningEvent,
+  SigningPayload,
+  SignerCapabilities,
+  StellarKeypairSignerOptions,
+} from "./signing.js";

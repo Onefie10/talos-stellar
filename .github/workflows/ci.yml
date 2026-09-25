@@ -25,6 +25,9 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Validate operational metrics definitions
+        run: node scripts/operational-metrics.test.mjs
+
       # ── Guard: run the detector's own test suite before it gates CI.
       #    A broken detector must never silently skip package checks.
       - name: Self-test detection script
@@ -191,6 +194,11 @@ jobs:
         working-directory: web
         run: pnpm test:unit
 
+      - name: "[web] Payment route coverage"
+        if: matrix.package == 'web' && !cancelled()
+        working-directory: web
+        run: pnpm test:payment-coverage
+
       # ── SDK: build/typecheck, tests ─────────────────────────────
       - name: "[sdk] Build & typecheck"
         if: matrix.package == 'sdk'
@@ -206,12 +214,18 @@ jobs:
       - name: "[prime-agent] Lint"
         if: matrix.package == 'prime-agent'
         working-directory: packages/prime-agent
-        run: uv run ruff check src tests
+        run: uv run ruff check src tests scripts
 
       - name: "[prime-agent] Test"
         if: matrix.package == 'prime-agent'
         working-directory: packages/prime-agent
-        run: uv run pytest tests/ -v
+        run: uv run pytest tests/ -v --cov --cov-report=json --cov-report=term
+
+      # Per-module floors for critical agent modules (issue #638).
+      - name: "[prime-agent] Coverage gate"
+        if: matrix.package == 'prime-agent'
+        working-directory: packages/prime-agent
+        run: uv run python scripts/check-coverage.py coverage.json
 
       # ── Contracts: cargo test, WASM build ───────────────────────
       - name: "[contracts] Test"
