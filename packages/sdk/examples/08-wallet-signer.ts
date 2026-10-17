@@ -1,89 +1,72 @@
+/**
+ * Example: sign Talos requests with a browser wallet (Freighter-compatible).
+ *
+ * Run with `tsx packages/sdk/examples/08-wallet-signer.ts` in a browser-like
+ * environment, or wire the same `signMessage` function into your app.
+ */
 import {
-  WalletMessageSigner,
+  SigningController,
   SigningError,
-  type WalletSignMessage,
-} from "../src/signing.js";
+  WalletMessageSigner,
+  canonicalizeRequest,
+} from "../src/index.js";
+
 
 /**
- * Example: sign a Talos request with a browser wallet.
- *
- * This example shows how to adapt a wallet's `signMessage`-style API (e.g.
- * Freighter, Albedo) to the SDK's `RequestSigner` abstraction without
- * depending on any wallet package.
+ * Typical Freighter `signMessage` shape. We declare it locally so this
+ * example does not depend on any wallet SDK.
  */
-
-// A typical wallet signMessage signature looks like this:
-// (Freighter's `signMessage(message, options)` returns a signed message.)
-type FreighterLikeWallet = {
+declare const freighter: {
   signMessage: (
     message: string,
     options?: { address?: string },
-  ) => Promise<{ signedMessage: string } | string>;
+  ) => Promise<{ signedMessage: string; signerAddress: string }>;
 };
 
-/**
- * Adapter that normalizes a wallet's signMessage result into the
- * signature format expected by the SDK.
- */
-function adaptWallet(wallet: FreighterLikeWallet): WalletSignMessage {
-  return async (payload: string) => {
-    const result = await wallet.signMessage(payload);
-    if (typeof result === "string") {
-      return result;
-    }
-    return result.signedMessage;
-  };
-}
-
 async function main(): Promise<void> {
-  // In a real browser app this would be the wallet connector from
-  // `web/src/components/providers.tsx`. Here we use a minimal stand-in
-  // that forwards to a signing function provided by the host app.
-  const wallet: FreighterLikeWallet = {
-    signMessage: async (message: string) => {
-      // This is where the actual wallet call happens. The wallet
-      // returns a base64-encoded signature over the provided message.
-      // For this example we delegate to a signer function that the
-      // host app would implement using the wallet's API.
-      return signMessageWithWallet(message);
-    },
-  };
-
+  // 1. Adapter the wallet API to the injected `signMessage` contract.
   const signer = new WalletMessageSigner({
-    signMessage: adaptWallet(wallet),
-    // The wallet address is used for capability reporting and
-    // identifying the signer in requests signed by this instance.
-    address: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    keyId: "freighter-user",
+    signMessage: async ({ message, address }) => {
+      const result = await freighter.signMessage(message, { address });
+      return {
+        signature: result.signedMessage,
+        publicKey: result.signerAddress,
+      };
+    },
   });
 
-  const capabilities = signer.getCapabilities();
-  console.log("Wallet signer capabilities:", capabilities);
+  // 2. Wrap it in a controller to bound concurrency and timeouts.
+  const controller = new SigningController(signer, {
+    timeoutMs: 30_000,
+    maxConcurrent: 1,
+    onEvent: (event) => {
+      // Privacy-safe: contains no URL, body, or signature bytes.
+      console.debug("[signing]", event.name, event.errorCode ?? "");
+    },
+  });
 
-  // The SigningController uses the signer to sign canonical request
-  // payloads. The signature is verified against the wallet address.
+  // 3. Canonicalize a request and sign it with the wallet.
+  const canonical = await canonicalizeRequest({
+    method: "GET",
+    url: "https://api.talos.example/v1/talos/1",
+    timestamp: new Date().toISOString(),
+    nonce: crypto.randomUUID(),
+  });
+
   try {
-    const signature = await signer.signMessage('talos:request:v1:{"example":true}');
-    console.log("Signature:", signature);
-  } catch (err) {
-    if (err instanceof SigningError && err.code === "USER_REJECTED") {
-      console.log("The user rejected the signing request.");
+    const signature = await controller.sign({
+      kind: "http-request-v1",
+      bytes: canonical,
+    });
+    console.log("Signed with", signature.keyId, "algorithm", signature.algorithm);
+  } catch (error) {
+    if (error instanceof SigningError && error.code === "USER_REJECTED") {
+      console.info("User declined to sign the request");
       return;
     }
-    throw err;
+    throw error;
   }
 }
 
-/**
- * Placeholder for the host app's wallet adapter. In a real app this
- * would call `FreighterApi.signMessage` or the equivalent Albedo call.
- */
-async function signMessageWithWallet(_message: string): Promise<string> {
-  throw new Error(
-    "Wire this to the host app's wallet adapter (e.g. FreighterApi.signMessage).",
-  );
-}
-
-void main().catch((err) => {
-  console.error(err);
-  process.exitCode(1);
-});
+void main();

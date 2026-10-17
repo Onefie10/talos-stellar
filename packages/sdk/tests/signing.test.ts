@@ -134,34 +134,40 @@ describe("SigningController", () => {
 });
 
 describe("WalletMessageSigner", () => {
-  const vector = signingVectors.vectors[0];
+  const keypair = {
+    publicKey: () => new Uint8Array([9, 9, 9]),
+    sign: async (bytes: Uint8Array) => new Uint8Array([...bytes, 7]),
+  };
 
-  it("signs canonical bytes through an injected wallet function", async () => {
-    const signMessage = vi.fn(async (message: Uint8Array) => ({
-      signature: new Uint8Array([9, 9, 9]),
-      publicKey: "test-key",
-    }));
-    const wallet = new WalletMessageSigner({ signMessage });
-    const bytes = await canonicalizeRequest(vector.request);
-    const result = await wallet.sign({ kind: "http-request-v1", bytes });
-    expect(signMessage).toHaveBeenCalledOnce();
-    expect(Array.from(signMessage.mock.calls[0][0])).toEqual(Array.from(bytes));
-    expect(result.signature).toEqual(new Uint8Array([9, 9, 9]));
-    expect(result.keyId).toBe("test-key");
+  it("reports wallet capabilities", () => {
+    const wallet = new WalletMessageSigner({
+      signMessage: async () => ({ signature: new Uint8Array([1]) }),
+      keyId: "wallet-key",
+    });
+    expect(wallet.getCapabilities()).toMatchObject({
+      capabilities: ["http-request-v1"],
+      algorithms: expect.arrayContaining(["ed25519"]),
+    });
   });
 
-  it("reports capabilities through getCapabilities", () => {
-    const wallet = new WalletMessageSigner({
-      signMessage: async () => ({ signature: new Uint8Array([1]), publicKey: "k" }),
-    });
-    expect(wallet.getCapabilities().capabilities).toContain("http-request-v1");
+  it("signs canonical bytes through the injected wallet function", async () => {
+    const signMessage = vi.fn(async (bytes: Uint8Array) => ({
+      signature: await keypair.sign(bytes),
+    }));
+    const wallet = new WalletMessageSigner({ signMessage, keyId: "wallet-key" });
+    const bytes = new TextEncoder().encode("canonical");
+    const result = await wallet.sign({ kind: "http-request-v1", bytes });
+    expect(signMessage).toHaveBeenCalledOnce();
+    expect(result.keyId).toBe("wallet-key");
+    expect(Array.from(result.signature)).toEqual([...bytes, 7]);
   });
 
   it("maps user rejection to a typed error code", async () => {
     const wallet = new WalletMessageSigner({
       signMessage: async () => {
-        throw new Error("User declined access");
+        throw new Error("User rejected the request");
       },
+      keyId: "wallet-key",
     });
     await expect(
       wallet.sign({ kind: "http-request-v1", bytes: new Uint8Array() }),
@@ -169,8 +175,9 @@ describe("WalletMessageSigner", () => {
   });
 
   it("rejects malformed wallet signatures", async () => {
-    const wallet = new WalletMessageSigner({
-      signMessage: async () => ({ signature: new Uint8Array(), publicKey: "k" }),
+    const wallet = new WalletMessageSigner( {
+      signMessage: async () => ({ signature: new Uint8Array() }),
+      keyId: "wallet-key",
     });
     await expect(
       wallet.sign({ kind: "http-request-v1", bytes: new Uint8Array() }),
@@ -180,7 +187,7 @@ describe("WalletMessageSigner", () => {
 
 describe("TalosClient signer integration", () => {
   it("signs the real fetch boundary when explicitly configured", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolved({
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({ id: "1" }),
     }));
@@ -201,14 +208,14 @@ describe("TalosClient signer integration", () => {
       expect.objectContaining({
         headers: expect.objectContaining({
           "X-Talos-Key-Id": "test-key",
-          "X-Talos-Signature": "AQKD",
+          "X-Talos-Signature": "AQID",
         }),
       }),
     );
   });
 
   it("preserves unsigned legacy requests when no signer is configured", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolved({
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({ id: "1" }),
     }));
