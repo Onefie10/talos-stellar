@@ -43,8 +43,7 @@ export type SigningErrorCode =
   | "TIMEOUT"
   | "CANCELLED"
   | "INVALID_RESULT"
-  | "SIGNING_FAILED"
-  | "USER_REJECTED";
+  | "SIGNING_FAILED";
 
 export class SigningError extends Error {
   constructor(
@@ -118,16 +117,16 @@ function base64Url(bytes: Uint8Array): string {
   return encoded.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
-async function sha256(bytes: Uint8array): Promise<Uint8array> {
+async function sha256(bytes: Uint8Array): Promise<Uint8Array> {
   const digest = await globalThis.crypto.subtle.digest(
     "SHA-256",
     bytes.slice().buffer as ArrayBuffer,
   );
-  return new Uint8array(digest);
+  return new Uint8Array(digest);
 }
 
-async function bodyBytes(body?: BodyInit | null): Promise<Uint8array> {
-  if (body == null) return new Uint8array();
+async function bodyBytes(body?: BodyInit | null): Promise<Uint8Array> {
+  if (body == null) return new Uint8Array();
   if (typeof body === "string") return encoder.encode(body);
   if (body instanceof URLSearchParams) return encoder.encode(body.toString());
   if (body instanceof ArrayBuffer) return new Uint8Array(body);
@@ -156,7 +155,7 @@ function canonicalUrl(input: string): string {
     url.username ||
     url.password
   ) {
-    throw new SigningError("INVALID_INPUT", "Request URL must use HTTPS) without embedded credentials", false);
+    throw new SigningError("INVALID_INPUT", "Request URL must use HTTP(S) without embedded credentials", false);
   }
   url.hash = "";
   const entries = [...url.searchParams.entries()].sort(([ak, av], [bk, bv]) =>
@@ -195,7 +194,7 @@ export async function canonicalizeRequest(request: CanonicalRequest): Promise<Ui
   }
   const headers = [...requestHeaders.entries()]
     .map(([key, value]) => [key.toLowerCase(), value.trim().replace(/\s+/g, " ")] as const)
-    .filter(([key]) => !SIGNATURE_HEADERS.has(key))
+    .filter(([key]) => !SEGNATURE_HEADERS.has(key))
     .sort(([a], [b]) => compareOrdinal(a, b))
     .map(([key, value]) => `${key}:${value}`)
     .join("\n");
@@ -216,7 +215,7 @@ export async function canonicalizeRequest(request: CanonicalRequest): Promise<Ui
 export async function detectSignerCapability(
   signer: RequestSigner,
   capability: SigningCapability,
-): Promise<boolean> {
+ ): Promise<boolean> {
   try {
     const result = await signer.getCapabilities();
     return result.capabilities.includes(capability);
@@ -298,33 +297,44 @@ export class SigningController {
     options.signal?.addEventListener("abort", onAbort, { once: true });
     try {
       const result = await Promise.race([
-        this.signer.sign(payload, { signal: timeout.signal, requestId: options.requestId }),
-        new Promise<SignatureResult>((_, reject) => {
+        this.signer.sign(payload, { ...options, signal: timeout.signal }),
+        new Promise<never>((resolve, reject) => {
           timeout.signal.addEventListener(
             "abort",
-            () => {
-              if (options.signal?.aborted) {
-                reject(cancelled(options.signal.reason));
-              } else {
-                reject(new SigningError("TIMEOUT", "Signing timed out", true));
-              }
-            },
+            () =>
+              reject(
+                options.signal?.aborted
+                  ? cancelled(options.signal.reason)
+                  : new SigningError("TIMEOUT", "Signer timed out", true),
+              ),
             { once: true },
           );
         }),
       ]);
+      if (!result.keyId || !result.algorithm || result.signature.length === 0) {
+        throw new SigningError("INVALID_RESULT", "Signer returned an incomplete signature", false);
+      }
       this.emit("signing.succeeded", payload.kind, options.requestId, Date.now() - started);
       return result;
-    } catch (error) {
-      const code = error instanceof SigningError ? error.code : "SIGNING_FAILED";
-      this.emit("signing.failed", payload.kind, options.requestId, Date.now() - started, code);
+    } catch (cause) {
+      const error =
+        cause instanceof SigningError
+          ? cause
+          : new SigningError("SIGNING_FAILED", "Signer failed", true, { cause });
+      this.emit("signing.failed", payload.kind, options.requestId, Date.now() - started, error.code);
       throw error;
     } finally {
       clearTimeout(timer);
       options.signal?.removeEventListener("abort", onAbort);
       this.active -= 1;
-      const next = this.queue.shift();
-      if (next) next.run();
+      this.drain();
+    }
+  }
+
+  private drain(): void {
+    while (this.active < this.maxConcurrent && this.queue.length > 0) {
+      const item = this.queue.shift()!;
+      if (!item.signal?.aborted) item.run();
     }
   }
 
@@ -334,176 +344,242 @@ export class SigningController {
     requestId?: string,
     durationMs?: number,
     errorCode?: SigningErrorCode,
-  ) {
-    this.options.onEvent?.({
-      name,
-      capability,
-      requestId,
-      durationMs,
-      errorCode,
-      active: this.active,
-      queued: this.queue.length,
-    });
+  ): void {
+    try {
+      this.options.onEvent?.({
+        name,
+        capability,
+        requestId,
+        durationMs,
+        errorCode,
+        active: this.active,
+        queued: this.queue.length,
+      });
+    } catch {
+      // Telemetry must never alter signing correctness or release behavior.
+    }
   }
 }
 
-function cancelled(reason?: unknown): SigningError {
-  return new SigningError("CANCELLED", "Signing was cancelled", true, { cause: reason });
+function cancelled(cause?: unknown): SigningError {
+  return new SigningError("CANCELLED", "Signing was cancelled", false, { cause });
 }
 
+export interface StellarKeypairSignerOptions {
+  keyId?: string;
+  capabilities?: readonly SigningCapability[];
+}
+
+/** Local signer intended for controlled server-side use; never logs or exports its seed. */
 export class StellarKeypairSigner implements RequestSigner {
   private readonly keypair: Keypair;
+  private readonly keyId: string;
+  private readonly supported: readonly SigningCapability[];
 
-  constructor(secretSeed: string) {
+  constructor(secret: string, options: StellarKeypairSignerOptions = {}) {
     try {
-      this.keypair = Keypair.fromSecret(secretSeed);
+      this.keypair = Keypair.fromSecret(secret);
     } catch (cause) {
-      throw new SigningError("INVALID_INPUT", "Invalid stellar secret seed", false, { cause });
+      throw new SigningError("INVALID_INPUT", "Invalid Stellar secret seed", false, { cause });
     }
+    this.keyId = options.keyId ?? this.keypair.publicKey();
+    this.supported = options.capabilities ?? ["http-request-v1", "stellar-transaction-v1"];
   }
 
   getCapabilities(): SignerCapabilities {
-    return {
-      capabilities: ["http-request-v1", "stellar-transaction-v1", "talos-payment-v1"],
-      algorithms: ["ed25519"],
-      maxConcurrent: 1,
-    };
+    return { capabilities: this.supported, algorithms: ["ed25519"], maxConcurrent: 64 };
   }
 
   async sign(payload: SigningPayload, options: SignOptions = {}): Promise<SignatureResult> {
     if (options.signal?.aborted) throw cancelled(options.signal.reason);
-    if (!payload || !(payload.bytes instanceof Uint8Array)) {
-      throw new SigningError("INVALID_INPUT", "Payload bytes are required", false);
+    if (!this.supported.includes(payload.kind)) {
+      throw new SigningError("UNSUPPORTED", `Signer does not support ${payload.kind}`, false);
     }
-    const signature = this.keypair.sign(Buffer.from(payload.bytes));
-    return {
-      algorithm: "ed25519",
-      keyId: this.keypair.publicKey(),
-      signature: new Uint8Array(signature),
-    };
+    try {
+      const signature = this.keypair.sign(Buffer.from(payload.bytes));
+      return {
+        algorithm: "ed25519",
+        keyId: this.keyId,
+        signature: new Uint8Array(signature),
+      };
+    } catch (cause) {
+      throw new SigningError("SIGNING_FAILED", "Stellar signing failed", true, { cause });
+    }
   }
 }
 
-export type WalletSignMessage = (message: string) => Promise<string>;
+// --- Wallet message signer ---
+
+export interface WalletSignMessageParams {
+  /** Canonical request bytes to be signed by the wallet. */
+  message: Uint8Array;
+  /** Optional human-readable prompt shown in the wallet UI. */
+  prompt?: string;
+  /** Wallet address that should sign, when known. */
+  address?: string;
+}
+
+export interface WalletSignMessageResult {
+  /** Signature as a base64 string or raw bytes. */
+  signature: string | Uint8Array;
+  /** Address that produced the signature, if the wallet reports it. */
+  keyId?: string;
+  /** Address alias used by some wallets (e.g. Freighter). */
+  signerAddress?: string;
+}
+
+export type WalletSignMessageFn = (
+  params: WalletSignMessageParams,
+  options?: { signal?: AbortSignal },
+) => Promise<WalletSignMessageResult>;
 
 export interface WalletMessageSignerOptions {
-  /** Function that signs a message with the user's wallet. */
-  signMessage: WalletSignMessage;
-  /** Public key (address) of the signing account. */
-  keyId: string;
-  /** Capabilities to advertise. Defaults to HTTP request signing. */
+  /** Explicit key ID to report; otherwise taken from the wallet result. */
+  keyId?: string;
+  /** Address to request signing from. */
+  address?: string;
+  /** Capabilities to advertise. Defaults to `http-request-v1`. */
   capabilities?: readonly SigningCapability[];
-  /** Algorithm label to report. Defaults to ed25519. */
+  /** Algorithm label to report. Defaults to `ed25519`. */
   algorithms?: readonly string[];
-  /** Maximum concurrent signing operations. */
+  /** Optional prompt forwarded to the wallet. */
+  prompt?: string;
+  /** Maximum concurrent signing operations to advertise. */
   maxConcurrent?: number;
 }
 
-const BASE64_PATTERN = /^[a-zA-Z0-9+/]+={{0,2}$/;
+export interface WalletMessageSignerConfig extends WalletMessageSignerOptions {
+  /** Injected wallet signing function. */
+  signMessage: WalletSignMessageFn;
+}
 
-function decodeBase64(input: string): Uint8Array {
+function decodeBase64(input: string): Uint8Array | null {
   const normalized = input.replace(/\s/g, "");
-  if (!normalized || !BASE64_PATTERN.test(normalized)) {
-    throw new SigningError("INVALID_RESULT", "Wallet returned a malformed signature", false);
-  }
+  if (!normalized) return null;
   try {
     if (typeof atob === "function") {
       const binary = atob(normalized);
-      const bytes = new Uint8Array(binary.length);
+      const out = new Uint8Array(binary.length);
       for (let i = 0; i < binary.length; i++) {
-        bytes[i] = binary.charCodeAt(i);
+        out[i] = binary.charCodeAt(i);
       }
-      return bytes;
+      return out;
     }
-    const buffer = Buffer.from(normalized, "base64");
-    return new Uint8Array(buffer);
-  } catch (cause) {
-    throw new SigningError("INVALID_RESULT", "Wallet returned a malformed signature", false, {
-      cause,
-    });
+    return new Uint8Array(Buffer.from(normalized, "base64"));
+  } catch {
+    return null;
   }
 }
 
-function isRejection(error: unknown): boolean {
-  if (!error) return false;
-  if (typeof error === "string") {
-    return /reject|declin|cancel/.test(error.toLowerCase());
-  }
-  if (typeof error === "object") {
-    const candidate = error as { code?: unknown; message?: unknown };
-    if (typeof candidate.code === "number" && candidate.code === 4001) return true;
-    if (typeof candidate.message === "string") {
-      return /reject|decline|cancel/.test(candidate.message.toLowerCase());
+function normalizeSignature(signature: string | Uint8Array): Uint8Array {
+  if (signature instanceof Uint8Array) {
+    if (signature.length === 0) {
+      throw new SigningError("INVALID_RESULT", "Wallet returned an empty signature", false);
     }
+    return signature;
   }
-  return false;
+  if (typeof signature !== "string") {
+    throw new SigningError("INVALID_RESULT", "Wallet returned a non-string signature", false);
+  }
+  const decoded = decodeBase64(signature);
+  if (!decoded || decoded.length === 0) {
+    throw new SigningError("INVALID_RESULT", "Wallet returned a malformed signature", false);
+  }
+  return decoded;
+}
+
+function isUserRejection(cause: unknown): boolean {
+  if (!cause || typeof cause !== "object") return false;
+  const record = cause as { code?: unknown; message?: unknown; name?: unknown };
+  const code = typeof record.code === "string" ? record.code.toLowerCase() : "";
+  if (code === "user_rejected" || code === "user-rejected") return true;
+  const message = typeof record.message === "string" ? record.message : "";
+  return /rejected|declined|cancelled|denied/i.test(message);
 }
 
 /**
- * Signs Talos requests via an injected wallet `signMessage` function.
- * The wallet signs the canonical request bytes (as a base64 string) and returns
- * a base64-encoded ed25519 signature. No wallet SDK is bundled.
+ * Signs Talos requests via an injected wallet `signMessage`-style function.
+ * The SDK does not bundle any wallet package; the caller supplies the adapter.
  */
 export class WalletMessageSigner implements RequestSigner {
-  private readonly signMessage: WalletSignMessage;
-  private readonly keyId: string;
-  private readonly capabilities: readonly SigningCapability[];
+  private readonly signMessage: WalletSignMessageFn;
+  private readonly keyId?: string;
+  private readonly address?: string;
+  private readonly supported: readonly SigningCapability[];
   private readonly algorithms: readonly string[];
-  private readonly maxConcurrent: number;
+  private readonly prompt?: string;
+  private readonly maxConcurrent?: number;
 
-  constructor(options: WalletMessageSignerOptions) {
-    if (!options || typeof options.signMessage !== "function") {
-      throw new SigningError("INVALID_INPUT", "A signMessage function is required", false);
+  constructor(
+    signMessageOrOptions: WalletSignMessageFn | WalletMessageSignerConfig,
+    options: WalletMessageSignerOptions = {},
+  ) {
+    if (typeof signMessageOrOptions === "function") {
+      this.signMessage = signMessageOrOptions;
+      this.keyId = options.keyId;
+      this.address = options.address;
+      this.supported = options.capabilities ?? ["http-request-v1"];
+      this.algorithms = options.algorithms ?? ["ed25519"];
+      this.prompt = options.prompt;
+      this.maxConcurrent = options.maxConcurrent;
+      return;
     }
-    if (typeof options.keyId !== "string" || !options.keyId) {
-      throw new SigningError("INVALID_INPUT", "A wallet keyId is required", false);
+    if (!signMessageOrOptions || typeof signMessageOrOptions.signMessage !== "function") {
+      throw new SigningError(
+        "INVALID_INPUT",
+        "WalletMessageSigner requires a signMessage function",
+        false,
+      );
     }
-    this.signMessage = options.signMessage;
-    this.keyId = options.keyId;
-    this.capabilities = options.capabilities ?? ["http-request-v1"];
-    this.algorithms = options.algorithms ?? ["ed25519"];
-    this.maxConcurrent = options.maxConcurrent ?? 1;
+    this.signMessage = signMessageOrOptions.signMessage;
+    this.keyId = signMessageOrOptions.keyId;
+    this.address = signMessageOrOptions.address;
+    this.supported = signMessageOrOptions.capabilities ?? ["http-request-v1"];
+    this.algorithms = signMessageOrOptions.algorithms ?? ["ed25519"];
+    this.prompt = signMessageOrOptions.prompt;
+    this.maxConcurrent = signMessageOrOptions.maxConcurrent;
   }
 
   getCapabilities(): SignerCapabilities {
-    return {
-      capabilities: this.capabilities,
+    const result: SignerCapabilities = {
+      capabilities: this.supported,
       algorithms: this.algorithms,
-      maxConcurrent: this.maxConcurrent,
     };
+    if (this.maxConcurrent !== undefined) result.maxConcurrent = this.maxConcurrent;
+    return result;
   }
 
   async sign(payload: SigningPayload, options: SignOptions = {}): Promise<SignatureResult> {
     if (options.signal?.aborted) throw cancelled(options.signal.reason);
     if (!payload || !(payload.bytes instanceof Uint8Array)) {
-      throw new SigningError("INVALID_INPUT", "Payload bytes are required", false);
+      throw new SigningError("INVALID_INPUT", "Signing payload bytes are required", false);
     }
-    if (!this.capabilities.includes(payload.kind)) {
-      throw new SigningError("UNSUPPORTED", `Wallet does not support ${payload.kind}`, false);
+    if (!this.supported.includes(payload.kind)) {
+      throw new SigningError("UNSUPPORTED", `Signer does not support ${payload.kind}`, false);
     }
-    const message = base64Url(payload.bytes);
-    let signed: unknown;
+    const params: WalletSignMessageParams = { message: payload.bytes };
+    if (this.prompt !== undefined) params.prompt = this.prompt;
+    if (this.address !== undefined) params.address = this.address;
+    let result: WalletSignMessageResult;
     try {
-      signed = await this.signMessage(message);
+      result = await this.signMessage(params, { signal: options.signal });
     } catch (cause) {
-      if (isRejection(cause)) {
-        throw new SigningError("USER_REJECTED", "User rejected the signing request", true, {
-          cause,
-        });
+      if (cause instanceof SigningError) throw cause;
+      if (options.signal?.aborted) throw cancelled(options.signal.reason);
+      if (isUserRejection(cause)) {
+        throw new SigningError("CANCELLED", "User rejected the wallet signature request", false, { cause });
       }
       throw new SigningError("SIGNING_FAILED", "Wallet signing failed", true, { cause });
     }
-    if (typeof signed !== "string") {
-      throw new SigningError("INVALID_RESULT", "Wallet returned an invalid signature", false);
+    if (!result || typeof result !== "object") {
+      throw new SigningError("INVALID_RESULT", "Wallet returned an invalid result", false);
     }
-    const signature = decodeBase64(signed);
-    if (signature.length !== 64) {
-      throw new SigningError("INVALID_RESULT", "Wallet signature must be 64 bytes", false);
+    const signature = normalizeSignature(result.signature);
+    const keyId = this.keyId ?? result.keyId ?? result.signerAddress ?? this.address;
+    if (!keyId) {
+      throw new SigningError("INVALID_RESULT", "Wallet did not report a key ID", false);
     }
-    return {
-      algorithm: this.algorithms[0] ?? "ed25519",
-      keyId: this.keyId,
-      signature,
-    };
+    const algorithm = this.algorithms[0] ?? "ed25519";
+    return { algorithm, keyId, signature };
   }
 }

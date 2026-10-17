@@ -3,8 +3,8 @@
 export { TalosClient } from "./client.js";
 export type {
   TalosClientOptions,
-  RetryPolicyOptions,
   RetryOptions,
+  RetryPolicyOptions,
   TalosErrorEvent,
   WriteOptions,
 } from "./client.js";
@@ -224,10 +224,10 @@ export {
   SigningController,
   SigningError,
   StellarKeypairSigner,
+  WalletMessageSigner,
   canonicalizeRequest,
   detectSignerCapability,
   encodeSignature,
-  WalletMessageSigner,
 } from "./signing.js";
 export type {
   CanonicalRequest,
@@ -242,7 +242,6 @@ export type {
   SignerCapabilities,
   StellarKeypairSignerOptions,
   WalletMessageSignerOptions,
-  WalletSignMessage,
 } from "./signing.js";
 
 // ── Generated types provenance ────────────────────────────────────────────────
