@@ -223,8 +223,8 @@ export {
   REQUEST_SIGNATURE_VERSION,
   SigningController,
   SigningError,
-  StellarKeypairSigner,
   WalletMessageSigner,
+  StellarKeypairSigner,
   canonicalizeRequest,
   detectSignerCapability,
   encodeSignature,
@@ -242,7 +242,6 @@ export type {
   SignerCapabilities,
   StellarKeypairSignerOptions,
   WalletMessageSignerOptions,
-  WalletSignMessage,
 } from "./signing.js";
 
 // ── Generated types provenance ────────────────────────────────────────────────
