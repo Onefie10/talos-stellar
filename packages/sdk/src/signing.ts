@@ -38,12 +38,13 @@ export interface RequestSigner {
 export type SigningErrorCode =
   | "INVALID_INPUT"
   | "UNSUPPORTED"
-  | "UNAVAILABLE"
+  | "UNAVAILABLD"
   | "SATURATED"
   | "TIMEOUT"
   | "CANCELLED"
   | "INVALID_RESULT"
-  | "SIGNING_FAILED";
+  | "SIGNING_FAILED"
+  | "USER_REJECTED";
 
 export class SigningError extends Error {
   constructor(
@@ -88,6 +89,11 @@ export interface CanonicalRequest {
 }
 
 const encoder = new TextEncoder();
+function compareOrdinal(left: string, right: string): number {
+  if (left < right) return -1;
+  if (left > right) return 1;
+  return 0;
+}
 const SIGNATURE_HEADERS = new Set([
   "authorization",
   "cookie",
@@ -112,16 +118,16 @@ function base64Url(bytes: Uint8Array): string {
   return encoded.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
-async function sha256(bytes: Uint8Array): Promise<Uint8Array> {
+async function sha256(bytes: Uint8array): Promise<Uint8array> {
   const digest = await globalThis.crypto.subtle.digest(
     "SHA-256",
     bytes.slice().buffer as ArrayBuffer,
   );
-  return new Uint8Array(digest);
+  return new Uint8array(digest);
 }
 
-async function bodyBytes(body?: BodyInit | null): Promise<Uint8Array> {
-  if (body == null) return new Uint8Array();
+async function bodyBytes(body?: BodyInit | null): Promise<Uint8array> {
+  if (body == null) return new Uint8array();
   if (typeof body === "string") return encoder.encode(body);
   if (body instanceof URLSearchParams) return encoder.encode(body.toString());
   if (body instanceof ArrayBuffer) return new Uint8Array(body);
@@ -142,12 +148,19 @@ function canonicalUrl(input: string): string {
   let url: URL;
   try {
     url = new URL(input);
-  } catch (cause) {
-    throw new SigningError("INVALID_INPUT", "A request URL must be absolute", false, { cause });
+  } catch {
+    throw new SigningError("INVALID_INPUT", "A request URL must be absolute", false);
+  }
+  if (
+    (url.protocol !== "https:" && url.protocol !== "http:") ||
+    url.username ||
+    url.password
+  ) {
+    throw new SigningError("INVALID_INPUT", "Request URL must use HTTPS) without embedded credentials", false);
   }
   url.hash = "";
   const entries = [...url.searchParams.entries()].sort(([ak, av], [bk, bv]) =>
-    ak === bk ? av.localeCompare(bv) : ak.localeCompare(bk),
+    ak === bk ? compareOrdinal(av, bv) : compareOrdinal(ak, bk),
   );
   url.search = "";
   for (const [key, value] of entries) url.searchParams.append(key, value);
@@ -159,14 +172,31 @@ function canonicalUrl(input: string): string {
  * safe sorted headers, SHA-256 body digest, timestamp, and nonce.
  */
 export async function canonicalizeRequest(request: CanonicalRequest): Promise<Uint8Array> {
-  const method = request.method.trim().toUpperCase();
-  if (!/^[A-Z]+$/.test(method) || !request.timestamp || !request.nonce) {
+  if (!request || typeof request !== "object") {
+    throw new SigningError("INVALID_INPUT", "A request object is required", false);
+  }
+  const method = typeof request.method === "string" ? request.method.trim().toUpperCase() : "";
+  if (
+    !/^[A-Z]+$/.test(method) ||
+    typeof request.timestamp !== "string" ||
+    !request.timestamp ||
+    /[\r\n]/.test(request.timestamp) ||
+    typeof request.nonce !== "string" ||
+    !request.nonce ||
+    /[\r\n]/.test(request.nonce)
+  ) {
     throw new SigningError("INVALID_INPUT", "Invalid method, timestamp, or nonce", false);
   }
-  const headers = [...new Headers(request.headers).entries()]
+  let requestHeaders: Headers;
+  try {
+    requestHeaders = new Headers(request.headers);
+  } catch {
+    throw new SigningError("INVALID_INPUT", "Invalid request headers", false);
+  }
+  const headers = [...requestHeaders.entries()]
     .map(([key, value]) => [key.toLowerCase(), value.trim().replace(/\s+/g, " ")] as const)
     .filter(([key]) => !SIGNATURE_HEADERS.has(key))
-    .sort(([a], [b]) => a.localeCompare(b))
+    .sort(([a], [b]) => compareOrdinal(a, b))
     .map(([key, value]) => `${key}:${value}`)
     .join("\n");
   const digest = base64Url(await sha256(await bodyBytes(request.body)));
@@ -269,7 +299,7 @@ export class SigningController {
     try {
       const result = await Promise.race([
         this.signer.sign(payload, { ...options, signal: timeout.signal }),
-        new Promise<never>((_, reject) => {
+        new Promise<never>((resolve, reject) => {
           timeout.signal.addEventListener(
             "abort",
             () =>
@@ -310,7 +340,7 @@ export class SigningController {
   }
 
   private emit(
-    name: SigningEvent["name"],
+    name: SigningEvent['name'],
     capability: SigningCapability,
     requestId?: string,
     durationMs?: number,
@@ -358,22 +388,170 @@ export class StellarKeypairSigner implements RequestSigner {
   }
 
   getCapabilities(): SignerCapabilities {
-    return { capabilities: this.supported, algorithms: ["ed25519"], maxConcurrent: 64 };
+    return { capabilities: this.supported, algorithms: ["ed25519"], maxConcurrent: 1 };
   }
 
-  async sign(payload: SigningPayload, options?: SignOptions): Promise<SignatureResult> {
-    if (options?.signal?.aborted) throw cancelled(options.signal.reason);
+  async sign(payload: SigningPayload, options: SignOptions = {}): Promise<SignatureResult> {
+    if (options.signal?.aborted) throw cancelled(options.signal.reason);
     if (!this.supported.includes(payload.kind)) {
       throw new SigningError("UNSUPPORTED", `Signer does not support ${payload.kind}`, false);
     }
-    return {
-      algorithm: "ed25519",
-      keyId: this.keyId,
-      signature: this.keypair.sign(Buffer.from(payload.bytes)),
-    };
+    if (!payload.bytes.length) {
+      throw new SigningError("INVALID_INPUT", "Signing payload is empty", false);
+    }
+    try {
+      const signature = new Uint8Array(this.keypair.sign(Buffer.from(payload.bytes)));
+      return {
+        algorithm: "ed25519",
+        keyId: this.keyId,
+        signature,
+      };
+    } catch (cause) {
+      throw new SigningError("SIGNING_FAILED", "Stellar keypair signing failed", true, { cause });
+    }
   }
 }
 
-export function encodeSignature(bytes: Uint8Array): string {
-  return base64Url(bytes);
+// --- Wallet message signer ---
+
+/** Result returned by an injected wallet signing function. */
+export interface WalletSignature {
+  signature: Uint8Array | string;
+  publicKey?: string;
+}
+
+/** Options passed to the injected wallet signing function. */
+export interface WalletSignMessageOptions {
+  keyId?: string;
+  signal?: AbortSignal;
+  requestId?: string;
+}
+
+/** Injected wallet function that signs canonical message bytes. */
+export type WalletSignMessage = (
+  bytes: Uint8Array,
+  options?: WalletSignMessageOptions,
+) => Promise<WalletSignature | Uint8Array | string>;
+
+export interface WalletMessageSignerOptions {
+  signMessage: WalletSignMessage;
+  keyId?: string;
+  algorithms?: readonly string[];
+  capabilities?: readonly SigningCapability[];
+}
+
+const WALLET_SIGNATURE_BYTES = 64;
+
+function decodeBase64(input: string): Uint8Array {
+  const normalized = input.replace(/-/g, "+").replace(/_/g, "/");
+  const padded = normalized + "=".repeat((normalized.length % 4 === 0 ? 0 : 4 - (normalized.length % 4)));
+  if (typeof atob === "function") {
+    const binary = atob(padded);
+    const out = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) {
+      out[i] = binary.charCodeAt(i);
+    }
+    return out;
+  }
+  return new Uint8Array(Buffer.from(padded, "base64"));
+}
+
+function normalizeWalletSignature(raw: WalletSignature | Uint8Array | string): Uint8Array {
+  if (raw instanceof Uint8Array) {
+    return raw;
+  }
+  if (typeof raw === "string") {
+    return decodeBase64(raw);
+  }
+  if (raw && typeof raw === "object" && "signature" in raw) {
+    const sig = raw.signature;
+    if (sig instanceof Uint8Array) return sig;
+    if (typeof sig === "string") return decodeBase64(sig);
+  }
+  throw new SigningError("INVALID_RESULT", "Wallet returned a malformed signature", false);
+}
+
+function isUserRejection(cause: unknown): boolean {
+  if (!cause || typeof cause !== "object") return false;
+  const code = (cause as { code?: unknown }).code;
+  if (code === "USER_REJECTED" || code === "SIGNER_REJECTED") return true;
+  const name = (cause as { name?: unknown }).name;
+  if (name === "UserRejectionError") return true;
+  return false;
+}
+
+/**
+ * Signs Talos requests through an injected wallet function (e.g. Freighter,
+ * Albedo). The SGK has no hard dependency on any wallet package.
+ */
+export class WalletMessageSigner implements RequestSigner {
+  private readonly signMessage: WalletSignMessage;
+  private readonly keyId?: string;
+  private readonly algorithms: readonly string[];
+  private readonly supported: readonly SigningCapability[];
+
+  constructor(options: WalletMessageSignerOptions) {
+    if (!options || typeof options.signMessage !== "function") {
+      throw new SigningError("INVALID_INPUT", "WalletMessageSigner requires a signMessage function", false);
+    }
+    this.signMessage = options.signMessage;
+    this.keyId = options.keyId;
+    this.algorithms = options.algorithms ?? ["ed25519"];
+    this.supported = options.capabilities ?? ["http-request-v1"];
+  }
+
+  getCapabilities(): SignerCapabilities {
+    return {
+      capabilities: this.supported,
+      algorithms: this.algorithms,
+      maxConcurrent: 1,
+    };
+  }
+
+  async sign(payload: SigningPayload, options: SignOptions = {}): Promise<SignatureResult> {
+    if (options.signal?.aborted) throw cancelled(options.signal.reason);
+    if (!this.supported.includes(payload.kind)) {
+      throw new SigningError("UNSUPPORTED", `Wallet signer does not support ${payload.kind}`, false);
+    }
+    if (!(payload.bytes instanceof Uint8Array) || payload.bytes.length === 0) {
+      throw new SigningError("INVALID_INPUT", "Signing payload is empty", false);
+    }
+    let raw: WalletSignature | Uint8Array | string;
+    try {
+      raw = await this.signMessage(payload.bytes, {
+        keyId: this.keyId,
+        signal: options.signal,
+        requestId: options.requestId,
+      });
+    } catch (cause) {
+      if (isUserRejection(cause)) {
+        throw new SigningError("USER_REJECTED", "User rejected the signing request", false, { cause });
+      }
+      if (options.signal?.aborted) {
+        throw cancelled(options.signal.reason);
+      }
+      throw new SigningError("SIGNING_FAILED", "Wallet signing failed", true, { cause });
+    }
+    const signature = normalizeWalletSignature(raw);
+    if (signature.length !== WALLET_SIGNATURE_BYTES) {
+      throw new SigningError(
+        "INVALID_RESULT",
+        `Wallet signature must be ${WALLET_SIGNATURE_BYTES} bytes, received ${signature.length}`,
+        false,
+      );
+    }
+    const keyId =
+      this.keyId ??
+      (raw && typeof raw === "object" && !(raw instanceof Uint8Array) && typeof raw.publicKey === "string"
+        ? raw.publicKey
+        : undefined);
+    if (!keyId) {
+      throw new SigningError("INVALID_RESULT", "Wallet did not provide a key ID", false);
+    }
+    return {
+      algorithm: this.algorithms[0] ?? "ed25519",
+      keyId,
+      signature,
+    };
+  }
 }
