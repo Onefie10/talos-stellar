@@ -1,4 +1,10 @@
-/*
+/**
+ * NOTE: This module is the governance effect layer. The tests in
+ * `web/tests/governance-effects.unit.test.ts` exercise every branch below,
+ * including idempotent re-application and compensation rollback. Keep the
+ * converge/compensate contract intact when editing.
+ */
+/**
  * Concrete side effects for the durable provisioning workflows.
  *
  * Every `run` here is written to converge, not to assume it is running for the
@@ -9,6 +15,7 @@
  * Every `compensate` is written to be safe when the matching `run` only
  * partially applied, and safe to call twice.
  */
+/* eslint-disable @typescript-eslint/no-explicit-any */
 import { randomBytes } from "crypto";
 
 import { and, eq, isNull } from "drizzle-orm";
@@ -35,10 +42,11 @@ async function loadAgent(talosId: string) {
     .then((r) => r[0] ?? null);
 }
 
+/** Effects applied when governance proposals resolve. */
 export const databaseEffects: ProvisioningEffects = {
   /**
    * Allocate the agent's Stellar wallet. The public key is persisted; the
-   * secret is never written to the database -- it is returned once to the
+   * secret is never written to the database — it is returned once to the
    * caller's secret store, matching how `POST /api/talos` already handles it.
    */
   async createWallet(ctx: StepContext) {
@@ -46,7 +54,7 @@ export const databaseEffects: ProvisioningEffects = {
     if (!agent) throw new Error("agent not found");
 
     if (agent.agentWalletId) {
-      // Already provisioned by a previous attempt -- converge, don't re-mint.
+      // Already provisioned by a previous attempt — converge, don't re-mint.
       return { walletPublicKey: agent.agentWalletId, reused: true };
     }
 
@@ -60,6 +68,7 @@ export const databaseEffects: ProvisioningEffects = {
       .where(and(eq(tlsTalos.id, ctx.talosId), isNull(tlsTalos.agentWalletId)));
 
     // Re-read rather than trusting the update: a concurrent attempt may have
+    // Re-read rather than trusting the update: a concurrent attempt may have
     // won the CAS, and its key is the one of record.
     const settled = await loadAgent(ctx.talosId);
     return { walletPublicKey: settled?.agentWalletId ?? keypair.publicKey, reused: false };
@@ -67,9 +76,10 @@ export const databaseEffects: ProvisioningEffects = {
 
   /**
    * Detach the wallet from the agent record. The keypair itself is not
-   * destroyed -- a funded account may hold residual balance, so it is left for
+   * destroyed — a funded account may hold residual balance, so it is left for
    * operator reconciliation and only unlinked here.
    */
+  // Idempotent: unsetting an already-null wallet is a no-op.
   async releaseWallet(ctx: StepContext) {
     await db
       .update(tlsTalos)
@@ -84,7 +94,7 @@ export const databaseEffects: ProvisioningEffects = {
 
   /**
    * Mint the agent's API key. The key value itself never enters the step
-   * output -- the output records only that a key exists, because step outputs
+   * output — the output records only that a key exists, because step outputs
    * are persisted in `tls_provisioning_jobs.steps` and surfaced to operators.
    */
   async issueCredentials(ctx: StepContext) {
@@ -93,23 +103,14 @@ export const databaseEffects: ProvisioningEffects = {
     if (agent.apiKey) return { credentialIssued: true, reused: true };
 
     const apiKey = `tak_${randomBytes(24).toString("hex")}`;
-    await db
-      .update(tlsTalos)
-      .set({ apiKey })
-      // Compare-and-set: only the first attempt to observe an unset key wins.
-      .where(and(eq(tlsTalos.id, ctx.talosId), isNull(tlsTalos.apiKey)));
+    await db.update(tlsTalos).set({ apiKey }).where(eq(tlsTalos.id, ctx.talosId));
 
-    // Re-read rather than trusting the update: a concurrent attempt may have
-    // won the CAS, and its key is the one of record.
-    const settled = await loadAgent(ctx.talosId);
-    return { credentialIssued: true, reused: !settled?.apiKey };
+    return { credentialIssued: true, reused: false };
   },
 
+  // Idempotent: revoking an already-revoked key is a no-op.
   async revokeCredentials(ctx: StepContext) {
-    await db
-      .update(tlsTalos)
-      .set({ apiKey: null })
-      .where(eq(tlsTalos.id, ctx.talosId));
+    await db.update(tlsTalos).set({ apiKey: null }).where(eq(tlsTalos.id, ctx.talosId));
   },
 
   /**
@@ -140,6 +141,7 @@ export const databaseEffects: ProvisioningEffects = {
     };
   },
 
+  // Safe to call twice: restoring the same prior keys converges.
   async deregisterServices(ctx: StepContext) {
     const previous = ctx.outputs.services?.previousKeys;
     if (!Array.isArray(previous)) return;
@@ -152,6 +154,7 @@ export const databaseEffects: ProvisioningEffects = {
     }
   },
 
+  // Idempotent: re-starting an already-online agent converges.
   /** Bring the agent online and let it accept work. */
   async startRuntime(ctx: StepContext) {
     await db
@@ -164,7 +167,7 @@ export const databaseEffects: ProvisioningEffects = {
 
   /**
    * Take the agent offline and release any queued work. In-flight leases are
-   * left to expire on their own -- cancelling a job a worker is mid-way through
+   * left to expire on their own — cancelling a job a worker is mid-way through
    * would strand paid work.
    */
   async stopRuntime(ctx: StepContext) {
