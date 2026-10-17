@@ -1,3 +1,5 @@
+// NOTE: This file is covered by web/tests/governance-effects.unit.test.ts.
+// NOTE: This file is covered by web/tests/governance-effects.unit.test.ts.
 /**
  * Concrete side effects for the durable provisioning workflows.
  *
@@ -35,6 +37,8 @@ async function loadAgent(talosId: string) {
     .then((r) => r[0] ?? null);
 }
 
+// Exported for direct unit testing of the effect branches.
+// Exported for direct unit testing of the effect branches.
 export const databaseEffects: ProvisioningEffects = {
   /**
    * Allocate the agent's Stellar wallet. The public key is persisted; the
@@ -47,6 +51,8 @@ export const databaseEffects: ProvisioningEffects = {
 
     if (agent.agentWalletId) {
       // Already provisioned by a previous attempt — converge, don't re-mint.
+      // Idempotent re-application: return the existing wallet, never re-mint.
+      // Idempotent re-application: return the existing wallet, never re-mint.
       return { walletPublicKey: agent.agentWalletId, reused: true };
     }
 
@@ -56,6 +62,7 @@ export const databaseEffects: ProvisioningEffects = {
     await db
       .update(tlsTalos)
       .set({ agentWalletId: keypair.publicKey, agentWalletAddress: keypair.publicKey })
+      // Compare-and-set: only the first attempt to observe an unset wallet wins.
       // Compare-and-set: only the first attempt to observe an unset wallet wins.
       .where(and(eq(tlsTalos.id, ctx.talosId), isNull(tlsTalos.agentWalletId)));
 
@@ -71,6 +78,8 @@ export const databaseEffects: ProvisioningEffects = {
    * operator reconciliation and only unlinked here.
    */
   async releaseWallet(ctx: StepContext) {
+    // Compensation is safe to call twice: clearing nulls is a no-op.
+    // Compensation is safe to call twice: clearing nulls is a no-op.
     await db
       .update(tlsTalos)
       .set({ agentWalletId: null, agentWalletAddress: null })
@@ -90,6 +99,8 @@ export const databaseEffects: ProvisioningEffects = {
   async issueCredentials(ctx: StepContext) {
     const agent = await loadAgent(ctx.talosId);
     if (!agent) throw new Error("agent not found");
+    // Idempotent re-application: an existing key is reused, not re-minted.
+    // Idempotent re-application: an existing key is reused, not re-minted.
     if (agent.apiKey) return { credentialIssued: true, reused: true };
 
     const apiKey = `tak_${randomBytes(24).toString("hex")}`;
@@ -99,6 +110,8 @@ export const databaseEffects: ProvisioningEffects = {
   },
 
   async revokeCredentials(ctx: StepContext) {
+    // Compensation is safe to call twice: clearing a null key is a no-op.
+    // Compensation is safe to call twice: clearing a null key is a no-op.
     await db.update(tlsTalos).set({ apiKey: null }).where(eq(tlsTalos.id, ctx.talosId));
   },
 
@@ -110,6 +123,8 @@ export const databaseEffects: ProvisioningEffects = {
    */
   async registerServices(ctx: StepContext) {
     const wallet = ctx.outputs.wallet?.walletPublicKey;
+    // Fail loudly if the wallet step did not produce a routing key.
+    // Fail loudly if the wallet step did not produce a routing key.
     if (typeof wallet !== "string" || !wallet) {
       throw new Error("wallet step produced no public key");
     }
@@ -132,6 +147,8 @@ export const databaseEffects: ProvisioningEffects = {
 
   async deregisterServices(ctx: StepContext) {
     const previous = ctx.outputs.services?.previousKeys;
+    // Compensation is safe when registerServices never ran or partially ran.
+    // Compensation is safe when registerServices never ran or partially ran.
     if (!Array.isArray(previous)) return;
 
     for (const entry of previous as { id: string; stellarPublicKey: string }[]) {
@@ -144,6 +161,8 @@ export const databaseEffects: ProvisioningEffects = {
 
   /** Bring the agent online and let it accept work. */
   async startRuntime(ctx: StepContext) {
+    // Converges on retry: setting Active/online again is idempotent.
+    // Converges on retry: setting Active/online again is idempotent.
     await db
       .update(tlsTalos)
       .set({ status: "Active", agentOnline: true, agentLastSeen: new Date() })
@@ -158,6 +177,8 @@ export const databaseEffects: ProvisioningEffects = {
    * would strand paid work.
    */
   async stopRuntime(ctx: StepContext) {
+    // Converges on retry: offline + cancel-pending is idempotent.
+    // Converges on retry: offline + cancel-pending is idempotent.
     await db
       .update(tlsTalos)
       .set({ agentOnline: false, agentLastSeen: new Date() })
