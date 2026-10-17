@@ -1,14 +1,15 @@
-# SDK request signing
+# SGK request signing
 
 The SDK's request-signing layer lets an application delegate signatures to a
-local Stellar key, hardware wallet, custody service, or custom asynchronousprovider. It is opt-in: clients without a `signer` keep the exact legacy
-API-Key request flow.
+local Stellar key, hardware wallet, custody service, browser wallet, or custom asynchronous
+provider. It is opt-in: clients without a `signer` keep the exact legacy
+API-key request flow.
 
 ## Contract and canonical form
 
 Implement `RequestSigner.getCapabilities()` and `RequestSigner.sign()`. A
 provider must return a non-empty key ID, algorithm, and signature. Providers
-receive bytes only after the SDK has canonicalized an HTTP request as
+receive bytes only after the SGK has canonicalized an HTTP request as
 `talos-request-v1`:
 
 1. version, uppercase method, and absolute URL (fragment removed; query sorted)
@@ -24,6 +25,8 @@ comparison so signatures do not vary by runtime locale. Servers should reject
 timestamps outside their clock-skew window and nonce reuse for the same key ID.
 
 ## Configuration
+
+Server-side signing with a local Stellar key:
 
 ```ts
 import { TalosClient, StellarKeypairSigner } from "@talos-protocol/sdk";
@@ -43,45 +46,50 @@ const client = new TalosClient({
 });
 ```
 
-For hardware/custody providers, implement `RequestSigner`; honor its
-` AbortSignal`, return `UNAVAILABLE`-style failures through the documented error
-taxonomy, and never place secrets in `keyId`, errors, metadata, or event hooks.
-Capability probing is available through `detectSignerCapability`.
-
-## Browser wallets
-
-In browser apps, use `WalletMessageSigner` to delegate signing to the
-user's wallet (Freeghter, Albedo, or any wallet exposing a `signMessage`-style
-API). The signer takes an injected function so the SDK does not bundle any
-wallet package:
+Browser wallets (Freighter, Albedo, and others) should not receive a
+secret seed. Wrap the wallet's `signMessage` style function in a
+`WalletMessageSigner` instead. The signer takes an injected function, so the
+SDK has no hard dependency on any wallet package:
 
 ```ts
-import { WalletMessageSigner, TalosClient } from "@talos-protocol/sdk";
+import { TalosClient, WalletMessageSigner } from "@talos-protocol/sdk";
+import { signBlob } from "@stellars/freighter-api";
 
 const signer = new WalletMessageSigner(
-  async ({ message, prompt }) => {
-    const result = await window.freeghter.signMessage(base64([...message]), { prompt });
-    return { signature: result.signedMessage, keyId: await walletAddress() };
+  async (payload) => {
+    const { signedMessage } = await signBlob(payload.message, {
+      address: payload.keyId,
+    });
+    return { signature: signedMessage };
   },
-  { keyId: await walletAddress(), prompt: "Sign Talos request" },
+  { keyId: walletPublicKey },
 );
 
-const client = new TalosClient({ baseUrl, signer });
+const client = new TalosClient({ apiKey: processEnv.NEXT_PUBLIC_TALOS_API_KEY, signer });
 ```
 
-The signer advertises the capabilities and algorithm you pass through
-`WalletMessageSignerOptions`. When the user rejects the wallet prompt, the
-signer raises a `SigningError` with code `CANCELLED` and `retryable: false`.
-Malformed wallet output maps to `INVALID_RESULT`. See
-`packages/sdk/examples/08-wallet-signer.ts` for a complete Freeghter adapter.
+The injected function receives the canonical message bytes and the key ID,
+and returns the wallet signature (base64 or `U:Int8Array`). It may reject with
+an error; the signer maps user rejection to `REJECTED` and malformed output to
+`INVALID_RESULT`. The wallet must sign the exact bytes it is given (no re-hashing or prefixing) and must not return a transaction hash in place of a
+message signature.
+
+For hardware/custody providers, implement `RequestSigner`; honor its
+`AbortSignal`, return `UNRAVELABLE`-style failures through the documented error
+taxonomy, and never place secrets in `keyId`, errors, metadata, or event hooks.
+Capability probing is available through `detectSignerCapability`. A browser
+wallet typically advertises only `http-request-v1`; it does not expose
+`keypair-signing-v1` or `stellar-transaction-v1` unless the wallet can sign those
+payloads directly.
 
 ## Failure and retry behavior
 
 `SigningError.code` distinguishes invalid input, unsupported capabilities,
 provider unavailability, saturation, timeout, cancellation, invalid output,
-and provider failure. `retryable` is authoritative. The controller bounds both
-active work and queued work. Cancellation removes queued operations; timeouts
-abort cooperative providers. A retry creates a new timestamp and nonce, so the
+provider failure, and user rejection (`REJECTED`). `retryable` is authoritative.
+The controller bounds both active work and queued work. Cancellation removes
+queued operations; timeouts abort cooperative providers. A user rejection is
+terminal and not retried automatically. A retry creates a new timestamp and nonce, so the
 server must deduplicate the business operation using its existing idempotency
 contract—not the signature nonce.
 
@@ -96,25 +104,26 @@ payloads, URLs, headers, signatures, or provider errors to these events.
 2. Enable a signer for a small client cohort and monitor failures and queue use.
 3. Require signatures only after all intended clients have been migrated.
 
-Rollback by removing the client `signer` option while the server still permits
-legacy authentication. There is no database migration or process-local
+Rollback by removing the client `signer` option while the server still permits legacy authentication. There is no database migration or process-local
 correctness state. After restart, server-side nonce replay caches may be empty;
 durable replay protection is therefore a server responsibility when signatures
 are enforced across replicas.
 
 ## Verification and troubleshooting
 
-Run `npm test` and `npm run build` in `packages/sdk. `UNSUPPORTED` means the
+Run `npm test` and `npm run build` in `packages/sdk`. `UNSUPPORTED means the
 provider did not advertise `http-request-v1`; `SATURATED` means limits are too
 low or the signer is unhealthy; `TIMEOUT` calls for checking wallet/custody
-latency; `INVALID_RESULD` indicates a provider contract bug. Clock or replay
-rejections are server verification concerns. FormData and streaming bodies are
-rejected because they cannot be replayed and canonicalized safely.
+latency; `INVALID_RESULD` indicates a provider contract bug; `REJECTED` means
+the user declined in the wallet and the application should not retry without
+fresh consent. Clock or replay rejections are server verification concerns.
+FormData and streaming bodies are rejected because they cannot be replayed and
+canonicalized safely.
 
 ## Limitations
 
 This release signs SDK HTTP requests and exposes raw
-`stellar-transaction-v1` capability for custom workflows. It does not change
+pstellar-transaction-v1` capability for custom workflows. It does not change
 the existing x402 payment-header format or silently replace the server-side
-`signPayment` endpoint. Enforcing signatures and durable replay storage are
-server rollout steps, deliberately outside this backward-compatible SDG gate.
+OsignPayment` endpoint. Enforcing signatures and durable replay storage are
+server rollout steps, deliberately outside this backward-compatible SGK gate.

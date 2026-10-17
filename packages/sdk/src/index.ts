@@ -3,8 +3,8 @@
 export { TalosClient } from "./client.js";
 export type {
   TalosClientOptions,
-  RetryOptions,
   RetryPolicyOptions,
+  RetryOptions,
   TalosErrorEvent,
   WriteOptions,
 } from "./client.js";
@@ -223,8 +223,8 @@ export {
   REQUEST_SIGNATURE_VERSION,
   SigningController,
   SigningError,
-  StellarKeypairSigner,
   WalletMessageSigner,
+  StellarKeypairSigner,
   canonicalizeRequest,
   detectSignerCapability,
   encodeSignature,
