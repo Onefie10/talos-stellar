@@ -156,7 +156,7 @@ function canonicalUrl(input: string): string {
     url.username ||
     url.password
   ) {
-    throw new SigningError("INVALID_INPUT", "Request URL must use HTTPS) without embedded credentials", false);
+    throw new SigningError("INVALID_INPUT", "Request URL must use HTTP(S) without embedded credentials", false);
   }
   url.hash = "";
   const entries = [...url.searchParams.entries()].sort(([ak, av], [bk, bv]) =>
