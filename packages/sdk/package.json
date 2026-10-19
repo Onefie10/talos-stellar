@@ -11,20 +11,40 @@
       "require": "./dist/cjs/index.cjs",
       "types": "./dist/esm/index.d.ts",
       "browser": "./dist/browser/sdk.bundle.js"
+    },
+    "./webhooks": {
+      "types": "./dist/esm/webhooks.d.ts",
+      "import": "./dist/esm/webhooks.js",
+      "require": "./dist/cjs/webhooks.cjs"
+    },
+    "./events": {
+      "types": "./dist/esm/events.d.ts",
+      "import": "./dist/esm/events.js",
+      "require": "./dist/cjs/events.cjs"
+    },
+    "./errors": {
+      "types": "./dist/esm/errors.d.ts",
+      "import": "./dist/esm/errors.js",
+      "require": "./dist/cjs/errors.cjs"
     }
   },
+  "bin": {
+    "talos": "./bin/talos.js"
+  },
   "files": [
-    "dist"
+    "dist",
+    "bin"
   ],
   "scripts": {
-    "build": "npm run build:esm && npm run build:cjs && npm run build:browser",
-    "build:esm": "tsc -p tsconfig.json",
-    "build:cjs": "tsc -p tsconfig.cjs.json && node scripts/rename-cjs.mjs",
-    "build:browser": "node scripts/bundle-browser.mjs",
+    "build": "node init && npm run build:esm && npm run build:cjs && npm run build:browser && npm run build:cli",
+    "build:cli": "node init && node scripts/build-cli.mjs",
+    "build:esm": "node init && tsc -p tsconfig.json",
+    "build:cjs": "node init && tsc -p tsconfig.cjs.json && node scripts/rename-cjs.mjs",
+    "build:browser": "node init && node scripts/bundle-browser.mjs",
     "check:bundle-size": "node scripts/check-browser-bundle-size.mjs",
     "fixtures:gen": "node scripts/generate-chaos-fixtures.mjs",
     "fixtures:check": "node scripts/generate-chaos-fixtures.mjs --check",
-    "dev": "tsc --watch",
+    "dev": "node init && tsc --watch",
     "test": "vitest run",
     "generate:types": "openapi-typescript \"../../web/tests/fixtures/openapi.snapshot.json\" -o \"src/generated-types.ts\"",
     "compat:exports": "node scripts/smoke-export-map.mjs",
