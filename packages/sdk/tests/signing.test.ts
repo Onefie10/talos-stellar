@@ -137,27 +137,38 @@ describe("WalletMessageSigner", () => {
   const vector = signingVectors.vectors[0];
 
   it("signs canonical request bytes through an injected wallet function", async () => {
-    const signMessage = vi.fn(async (bytes: Uint8Array) => ({
-      signature: new Uint8Array([9, 8, 7]),
-      publicKey: "test-key",
+    const signMessage = vi.fn(async (message: Uint8Array) => ({
+      signature: new Uint8Array([9, 9, 9]),
+      publicKey: "wallet-key",
+      message,
     }));
-    const wallet = new WalletMessageSigner({ signMessage });
+    const wallet = new WalletMessageSigner({
+      signMessage,
+      algorithm: "test-ed25519",
+    });
+
+    await expect(detectSignerCapability(wallet, "http-request-v1")).resolves.toBe(true);
+    await expect(detectSignerCapability(wallet, "talos-payment-v1")).resolves.toBe(false);
+
     const bytes = await canonicalizeRequest(vector.request);
     const result = await wallet.sign({ kind: "http-request-v1", bytes });
 
     expect(signMessage).toHaveBeenCalledOnce();
     expect(Array.from(signMessage.mock.calls[0][0])).toEqual(Array.from(bytes));
-    expect(result).toMatchObject({ keyId: "test-key", signature: new Uint8Array([9, 8, 7]) });
-    expect(wallet.getCapabilities().capabilities).toContain("http-request-v1");
+    expect(result).toMatchObject({
+      algorithm: "test-ed25519",
+      keyId: "wallet-key",
+    });
+    expect(Array.from(result.signature)).toEqual([9, 9, 9]);
   });
 
   it("maps user rejection to a typed error code", async () => {
-    // Freighter/Albedo surface rejection as a thrown Error; the signer must map it to USER_REJECTED.
-    const wallet = new WalletMessageSigner({
+    const wallet = new WalletMessageSigner( {
       signMessage: async () => {
         throw new Error("User declined access");
       },
     });
+
     await expect(
       wallet.sign({ kind: "http-request-v1", bytes: new Uint8Array() }),
     ).rejects.toMatchObject({ code: "USER_REJECTED" });
@@ -165,8 +176,9 @@ describe("WalletMessageSigner", () => {
 
   it("rejects malformed wallet signatures", async () => {
     const wallet = new WalletMessageSigner({
-      signMessage: async () => ({ signature: "not-bytes", publicKey: "test-key" } as never),
+      signMessage: async () => ({ signature: "not-bytes" as never, publicKey: "wallet-key" }),
     });
+
     await expect(
       wallet.sign({ kind: "http-request-v1", bytes: new Uint8Array() }),
     ).rejects.toMatchObject({ code: "INVALID_RESULT" });
@@ -208,7 +220,7 @@ describe("TalosClient signer integration", () => {
       json: async () => ({ id: "1" }),
     }));
     await new TalosClient({ baseUrl: "https://example.test" }).getTalos("1");
-    const headers = vi.mocked(fetch).mock.calls[0][1]?.headers as Record<string, string>;
+    const headers = vi.mocked(fetch).mockCalls[0][1]?.headers as Record<string, string>;
     expect(headers["X-Talos-Signature"]).toBeUndefined();
   });
 });
