@@ -1,0 +1,33 @@
+{
+  "default_branch": "main",
+  "branches": [
+    "feat/filter-services-by-payment-network-523",
+    "feat/issue-539-feat-agent-rotate-checkpoint-encryption-keys",
+    "feat/issue-978-feat-sdk-add-a-browser-wallet-request-signer",
+    "feat/issue-978-feat-sdk-add-a-browser-wallet-request-signer-r2",
+    "fix/issue-993-test-web-cover-governance-effects-application",
+    "fix/issue-993-test-web-cover-governance-effects-application-r2",
+    "main",
+    "origin"
+  ],
+  "parent": {
+    "feat/filter-services-by-payment-network-523": "main",
+    "feat/issue-539-feat-agent-rotate-checkpoint-encryption-keys": "main",
+    "feat/issue-978-feat-sdk-add-a-browser-wallet-request-signer": "main",
+    "feat/issue-978-feat-sdk-add-a-browser-wallet-request-signer-r2": "feat/issue-978-feat-sdk-add-a-browser-wallet-request-signer",
+    "fix/issue-993-test-web-cover-governance-effects-application": "main",
+    "fix/issue-993-test-web-cover-governance-effects-application-r2": "fix/issue-993-test-web-cover-governance-effects-application",
+    "main": null,
+    "origin": "main"
+  },
+  "order": [
+    "main",
+    "feat/filter-services-by-payment-network-523",
+    "feat/issue-539-feat-agent-rotate-checkpoint-encryption-keys",
+    "feat/issue-978-feat-sdk-add-a-browser-wallet-request-signer",
+    "fix/issue-993-test-web-cover-governance-effects-application",
+    "origin",
+    "feat/issue-978-feat-sdk-add-a-browser-wallet-request-signer-r2",
+    "fix/issue-993-test-web-cover-governance-effects-application-r2"
+  ]
+}
